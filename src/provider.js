@@ -1,0 +1,3 @@
+const axios=require('axios');
+async function call(p,params){const r=await axios.post(p.api_url,new URLSearchParams({key:p.api_key,...Object.fromEntries(Object.entries(params).map(([k,v])=>[k,String(v)]))}).toString(),{timeout:25000,headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'}});if(!r.data||typeof r.data!=='object'||Array.isArray(r.data))throw Error('Provider returned invalid JSON');if(r.data.error)throw Error(String(r.data.error));return r.data}
+module.exports={add:(p,service,link,quantity)=>call(p,{action:'add',service,link,quantity}),status:(p,order)=>call(p,{action:'status',order})};
