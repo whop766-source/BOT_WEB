@@ -5,3 +5,26 @@ CREATE TABLE IF NOT EXISTS orders(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NU
 CREATE INDEX IF NOT EXISTS orders_sync_idx ON orders(status,last_sync_at);
 CREATE TABLE IF NOT EXISTS transactions(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id),kind VARCHAR(20) NOT NULL,amount NUMERIC(14,4) NOT NULL,reference VARCHAR(190),note TEXT,created_at TIMESTAMPTZ DEFAULT NOW());
 CREATE TABLE IF NOT EXISTS deposits(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id),method VARCHAR(30) DEFAULT 'manual',amount NUMERIC(14,4) NOT NULL,reference VARCHAR(190),status VARCHAR(20) DEFAULT 'pending',created_at TIMESTAMPTZ DEFAULT NOW());
+
+CREATE TABLE IF NOT EXISTS campaign_packages(
+  id BIGSERIAL PRIMARY KEY,
+  name VARCHAR(160) NOT NULL,
+  platform VARCHAR(80) NOT NULL DEFAULT 'Any',
+  description TEXT,
+  services JSONB NOT NULL DEFAULT '[]'::jsonb,
+  default_duration_hours INTEGER NOT NULL DEFAULT 24 CHECK(default_duration_hours BETWEEN 1 AND 168),
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS order_delivery_snapshots(
+  id BIGSERIAL PRIMARY KEY,
+  order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  delivered_units INTEGER NOT NULL CHECK(delivered_units >= 0),
+  remains INTEGER,
+  status VARCHAR(30) NOT NULL,
+  source VARCHAR(30) NOT NULL DEFAULT 'provider',
+  recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS delivery_snapshots_order_time_idx
+  ON order_delivery_snapshots(order_id, recorded_at);
