@@ -1,0 +1,17 @@
+name: Sync provider orders
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call API
+        env:
+          API_URL: ${{ secrets.SURU_API_URL }}
+          CRON_SECRET: ${{ secrets.SURU_CRON_SECRET }}
+        run: |
+          test -n "$API_URL"
+          test -n "$CRON_SECRET"
+          curl --fail-with-body --silent --show-error -X POST -H "x-cron-secret: $CRON_SECRET" "${API_URL%/}/api/cron/sync"
