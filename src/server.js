@@ -106,8 +106,15 @@ app.get('/api', (req, res) => {
       'GET /api/admin/users',
       'POST /api/admin/wallet-adjust',
       'GET /api/admin/deposits',
-      'POST /api/admin/deposits/:id/decision'
+      'POST /api/admin/deposits/:id/decision',
+      'GET /api/admin/packages',
+      'POST /api/admin/packages',
+      'PATCH /api/admin/packages/:id',
+      'DELETE /api/admin/packages/:id',
+      'PATCH /api/admin/services/:id/active'
     ],
+    packages: ['GET /api/packages'],
+    progress: ['GET /api/orders/:id/progress'],
     cron: 'POST /api/cron/sync'
   });
 });
@@ -183,6 +190,110 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
 app.get('/api/me', auth, (req, res) => {
   res.json({ user: safe(req.user) });
 });
+
+
+// CAMPAIGN PACKAGES: users can see only active packages
+app.get('/api/packages', auth, asyncRoute(async (req, res) => {
+  const result = await db.query(
+    `SELECT id, name, platform, description, services,
+            default_duration_hours
+     FROM campaign_packages WHERE active = TRUE ORDER BY id`
+  );
+  res.json({ packages: result.rows });
+}));
+
+// ADMIN: package management. Service IDs and choices are configured explicitly.
+app.get('/api/admin/packages', auth, admin, asyncRoute(async (req, res) => {
+  const result = await db.query(
+    'SELECT * FROM campaign_packages ORDER BY id DESC'
+  );
+  res.json({ packages: result.rows });
+}));
+
+app.post('/api/admin/packages', auth, admin, asyncRoute(async (req, res) => {
+  const name = String(req.body.name || '').trim();
+  const platform = String(req.body.platform || 'Any').trim();
+  const description = String(req.body.description || '').trim();
+  const duration = Number(req.body.default_duration_hours || 24);
+  const services = req.body.services;
+
+  if (!name || !Array.isArray(services) ||
+      !Number.isInteger(duration) || duration < 1 || duration > 168) {
+    return res.status(400).json({
+      error: 'name, services array and duration 1-168 hours are required'
+    });
+  }
+  for (const item of services) {
+    if (!item || !Number.isSafeInteger(Number(item.service_id)) ||
+        Number(item.service_id) < 1) {
+      return res.status(400).json({
+        error: 'Each package service needs a valid service_id'
+      });
+    }
+  }
+  const result = await db.query(
+    `INSERT INTO campaign_packages
+       (name, platform, description, services, default_duration_hours)
+     VALUES ($1,$2,$3,$4::jsonb,$5) RETURNING *`,
+    [name, platform, description, JSON.stringify(services), duration]
+  );
+  res.status(201).json({ package: result.rows[0] });
+}));
+
+app.patch('/api/admin/packages/:id', auth, admin, asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    return res.status(400).json({ error: 'Invalid package ID' });
+  }
+  const current = await db.query('SELECT * FROM campaign_packages WHERE id=$1', [id]);
+  if (!current.rowCount) return res.status(404).json({ error: 'Package not found' });
+  const old = current.rows[0];
+  const name = req.body.name === undefined ? old.name : String(req.body.name).trim();
+  const platform = req.body.platform === undefined ? old.platform : String(req.body.platform).trim();
+  const description = req.body.description === undefined ? old.description : String(req.body.description);
+  const duration = req.body.default_duration_hours === undefined ? Number(old.default_duration_hours) : Number(req.body.default_duration_hours);
+  const services = req.body.services === undefined ? old.services : req.body.services;
+  const active = req.body.active === undefined ? old.active : Boolean(req.body.active);
+  if (!name || !Array.isArray(services) || !Number.isInteger(duration) || duration < 1 || duration > 168) {
+    return res.status(400).json({ error: 'Invalid package fields' });
+  }
+  for (const item of services) {
+    if (!item || !Number.isSafeInteger(Number(item.service_id)) || Number(item.service_id) < 1) {
+      return res.status(400).json({ error: 'Each package service needs a valid service_id' });
+    }
+  }
+  const result = await db.query(
+    `UPDATE campaign_packages
+     SET name=$1, platform=$2, description=$3, services=$4::jsonb,
+         default_duration_hours=$5, active=$6, updated_at=NOW()
+     WHERE id=$7 RETURNING *`,
+    [name, platform, description, JSON.stringify(services), duration, active, id]
+  );
+  res.json({ package: result.rows[0] });
+}));
+
+app.delete('/api/admin/packages/:id', auth, admin, asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  const result = await db.query(
+    'UPDATE campaign_packages SET active=FALSE, updated_at=NOW() WHERE id=$1 RETURNING id, active',
+    [id]
+  );
+  if (!result.rowCount) return res.status(404).json({ error: 'Package not found' });
+  res.json({ message: 'Package disabled', package: result.rows[0] });
+}));
+
+app.patch('/api/admin/services/:id/active', auth, admin, asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1 || typeof req.body.active !== 'boolean') {
+    return res.status(400).json({ error: 'Valid service ID and boolean active required' });
+  }
+  const result = await db.query(
+    'UPDATE services SET active=$1 WHERE id=$2 RETURNING id, name, active',
+    [req.body.active, id]
+  );
+  if (!result.rowCount) return res.status(404).json({ error: 'Service not found' });
+  res.json({ service: result.rows[0] });
+}));
 
 // CUSTOMER SERVICES
 app.get('/api/services', auth, asyncRoute(async (req, res) => {
@@ -331,6 +442,11 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
       [String(result.order), order.id]
     );
 
+    await db.query(
+      `INSERT INTO order_delivery_snapshots(order_id, delivered_units, remains, status, source)
+       VALUES($1, 0, $2, 'processing', 'provider')`,
+      [order.id, quantity]
+    );
     return res.status(201).json({ order: updated.rows[0] });
   } catch (error) {
     const refundClient = await db.client();
@@ -409,6 +525,28 @@ app.get('/api/transactions', auth, asyncRoute(async (req, res) => {
   );
 
   res.json({ transactions: result.rows });
+}));
+
+
+// USER: provider-reported delivery history for graphing.
+// No synthetic or interpolated delivery values are returned.
+app.get('/api/orders/:id/progress', auth, asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    return res.status(400).json({ error: 'Invalid order ID' });
+  }
+  const orderResult = await db.query(
+    `SELECT id, user_id, quantity, status, remains, created_at, updated_at
+     FROM orders WHERE id=$1 AND user_id=$2`,
+    [id, req.user.id]
+  );
+  if (!orderResult.rowCount) return res.status(404).json({ error: 'Order not found' });
+  const snapshots = await db.query(
+    `SELECT delivered_units, remains, status, source, recorded_at
+     FROM order_delivery_snapshots WHERE order_id=$1 ORDER BY recorded_at`,
+    [id]
+  );
+  res.json({ order: orderResult.rows[0], snapshots: snapshots.rows });
 }));
 
 // MANUAL DEPOSIT REQUEST
@@ -895,6 +1033,21 @@ app.post('/api/cron/sync', asyncRoute(async (req, res) => {
            WHERE id = $4`,
           [status, raw, remains, order.id]
         );
+
+        // Save provider-reported progress for the user's delivery graph.
+        // If the provider doesn't return remains, don't invent a progress value.
+        if (current && (remains !== null || status === 'completed')) {
+          const delivered = status === 'completed'
+            ? Number(current.quantity)
+            : Math.max(0, Math.min(Number(current.quantity),
+                Number(current.quantity) - Number(remains)));
+          await client.query(
+            `INSERT INTO order_delivery_snapshots
+               (order_id, delivered_units, remains, status, source)
+             VALUES($1,$2,$3,$4,'provider')`,
+            [order.id, delivered, remains, status]
+          );
+        }
 
         if (
           current &&
